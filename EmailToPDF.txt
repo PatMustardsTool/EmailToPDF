@@ -1,0 +1,336 @@
+'VBA References
+'Visual Basic For Applications
+'Microsoft Exel 16.0 Object Library
+'OLE Automation
+'Microsoft Office 16.0 Object Library
+'Microsoft Outlook 16.0 Object Library
+'Microsoft Word 16.0 Object Library
+'Adobe Acrobat 10.0 Type Library
+'Microsoft Windows Image Acquisition Library v2.0
+'Microsoft Shell Controls And Automation
+'Microsoft Internet Controls
+'Microsoft Scripting Runtime
+
+Option Explicit
+
+Public Declare Function ShowWindow Lib "user32" (ByVal hwnd As Long, ByVal nCmdSHow As Long) As Long
+
+Public Sub EmailToPDF()
+
+Call LudicrousMode(True)
+
+'Get Main Sheet Parameters
+Dim MainSheet As Worksheet: Set MainSheet = ThisWorkbook.Sheets("Main")
+Dim EmailFolder As String: EmailFolder = MainSheet.Range("B2") & "\"
+
+'Page Orientation
+Dim PageOrientation As Integer
+If MainSheet.Range("B3") = "Portrait" _
+Then
+    PageOrientation = 0
+Else
+    PageOrientation = 1
+End If
+
+'Get FileExplorer Window
+Dim ExplorerWindow As InternetExplorer: Set ExplorerWindow = Get_File_Explorer(EmailFolder)
+
+'Get Active Email & Save
+Dim OLApplication As Outlook.Application: Set OLApplication = CreateObject("Outlook.Application")
+Dim OLMailItem As MailItem: Set OLMailItem = ActiveExplorer.Selection.Item(1)
+Dim SaveName As String: SaveName = Format(OLMailItem.CreationTime, "dd_mm_yy_hh_nn_ss")
+Dim EmailFilePath As String: EmailFilePath = EmailFolder & SaveName
+
+'Check For Files
+Dim PDFFile As String: PDFFile = Dir(EmailFolder & "*" & SaveName & "*" & ".pdf", vbNormal)
+If Len(PDFFile) > 0 _
+Then
+    Kill EmailFolder & "*" & SaveName & "*"
+End If
+
+OLMailItem.SaveAs EmailFilePath & ".msg", olMSG
+
+Dim MsgAttachments As Boolean
+
+'Check For Msg Attachments
+Dim i As Integer: i = 1
+Dim OLAttachment As Attachment: For Each OLAttachment In OLMailItem.Attachments
+
+    If Right(OLAttachment.Filename, 3) = "msg" _
+    Then
+        MsgAttachments = True
+        OLAttachment.SaveAsFile EmailFilePath & "_Email_" & i & ".msg"
+        i = i + 1
+    End If
+
+Next OLAttachment
+
+'Convert Attachments
+Convert_Attachments EmailFilePath, PageOrientation
+Kill EmailFilePath & ".msg"
+
+'Loop Through Any Other Emails
+If MsgAttachments = True _
+Then
+    Dim MsgFile As String: MsgFile = Dir(EmailFilePath & "*_Email_*" & ".msg", vbNormal)
+    Do While Len(MsgFile) > 0
+        MsgFile = Replace(EmailFolder & Dir(EmailFilePath & "*_Email_*" & ".msg", vbNormal), ".msg", "")
+        Convert_Attachments MsgFile, PageOrientation
+        Kill MsgFile & ".msg"
+        MsgFile = Dir
+    Loop
+End If
+
+i = 0
+Dim PDFArray() As String
+PDFFile = Dir(EmailFolder & "*" & SaveName & "*" & ".pdf", vbNormal)
+Do While Len(PDFFile) > 0
+    ReDim Preserve PDFArray(i): PDFArray(i) = EmailFolder & PDFFile
+    i = i + 1
+    PDFFile = Dir
+Loop
+
+'Merge PDFS
+If i > 0 _
+Then
+    Merge_PDFS PDFArray()
+End If
+
+Call LudicrousMode(False)
+
+End Sub
+
+Public Function Convert_Attachments(MSGPATH As String, MYORIENTATION As Integer)
+
+Dim OLApplication As Outlook.Application: Set OLApplication = CreateObject("Outlook.Application")
+Dim OLMailItem As MailItem: Set OLMailItem = OLApplication.GetNamespace("MAPI").OpenSharedItem(MSGPATH & ".msg")
+
+OLMailItem.SaveAs MSGPATH & ".doc", olDoc
+
+'Convert Email To Word
+Dim wrdApp As Word.Application: Set wrdApp = CreateObject("Word.Application")
+Dim wrdDoc As Word.Document: Set wrdDoc = wrdApp.Documents.Open(Filename:=MSGPATH & ".doc", Visible:=False)
+
+'Set Layout
+On Error Resume Next
+wrdDoc.PageSetup.Orientation = MYORIENTATION
+wrdDoc.PageSetup.RightMargin = 10
+wrdDoc.PageSetup.LeftMargin = 10
+wrdDoc.PageSetup.TopMargin = 10
+wrdDoc.PageSetup.BottomMargin = 10
+On Error GoTo 0
+
+'Fit Tables
+Dim WordTable: For Each WordTable In wrdDoc.Tables
+
+    WordTable.AutoFitBehavior wdAutoFitContent
+    WordTable.Range.Paragraphs.KeepWithNext = True
+        
+Next
+
+'Fit Images
+Dim inline_shape As InlineShape: For Each inline_shape In wrdDoc.InlineShapes
+
+    If inline_shape.Width > wrdDoc.PageSetup.PageWidth - 20 Then inline_shape.Width = wrdDoc.PageSetup.PageWidth * 0.85
+    If inline_shape.Height > wrdDoc.PageSetup.PageHeight - 20 Then inline_shape.Height = wrdDoc.PageSetup.PageHeight * 0.85
+        
+Next
+
+'Export As PDF
+wrdDoc.ExportAsFixedFormat OutputFileName:=MSGPATH & ".pdf", ExportFormat:=wdExportFormatPDF
+wrdDoc.Close wdDoNotSaveChanges
+
+'Delete Word Doc
+Kill MSGPATH & ".doc"
+
+'File System Object
+Dim FSO As FileSystemObject: Set FSO = New FileSystemObject
+Dim FileExtension As String
+
+Dim PropAccessor As PropertyAccessor
+Dim AVTarget As New Acrobat.AcroAVDoc: Set AVTarget = CreateObject("acroexch.avdoc")
+Dim AcrobatTarget As Acrobat.AcroPDDoc:
+
+Dim i As Integer: i = 1
+Dim OLAttachment As Attachment: For Each OLAttachment In OLMailItem.Attachments
+    
+    'FileExtension = UCase(Right(OLAttachment.Filename, 3))
+    FileExtension = UCase(FSO.GetExtensionName(OLAttachment.Filename))
+    
+    'Image Attachments
+    If FileExtension = "JPG" Or FileExtension = "PNG" Or FileExtension = "BMP" Or FileExtension = "GIF" Or FileExtension = "TIFF" _
+    Then
+    
+        'Check Embedded
+        Set PropAccessor = OLAttachment.PropertyAccessor
+        If PropAccessor.GetProperty("http://schemas.microsoft.com/mapi/proptag/0x7FFE000B") = "True" _
+        Then
+            GoTo Skip:
+        End If
+    
+        OLAttachment.SaveAsFile MSGPATH & "_" & i & "." & FileExtension
+        
+        AVTarget.Open MSGPATH & "_" & i & "." & FileExtension, ""
+        Set AcrobatTarget = AVTarget.GetPDDoc()
+        AcrobatTarget.Save PDSaveFull, MSGPATH & "_" & i & ".pdf"
+        AVTarget.Close (False)
+        AcrobatTarget.Close
+        Kill MSGPATH & "_" & i & "." & FileExtension
+        
+    'PDF Attachments
+    ElseIf FileExtension = "PDF" _
+    Then
+        OLAttachment.SaveAsFile MSGPATH & "_" & i & ".pdf"
+    
+    'Word Attachments
+    ElseIf FileExtension = "DOCX" Or FileExtension = "DOC" _
+    Then
+        OLAttachment.SaveAsFile MSGPATH & "_" & i & "." & FileExtension
+        
+        Set wrdDoc = wrdApp.Documents.Open(Filename:=MSGPATH & "_" & i & "." & FileExtension, Visible:=False)
+        wrdDoc.PageSetup.Orientation = MYORIENTATION
+        wrdDoc.ExportAsFixedFormat OutputFileName:=MSGPATH & "_" & i & ".pdf", ExportFormat:=wdExportFormatPDF
+        wrdDoc.Close wdDoNotSaveChanges
+        Kill MSGPATH & "_" & i & "." & FileExtension
+    
+    'EmailAttachments (Save Them Off And Loop Through Them In Turn)
+    ElseIf FileExtension = "MSG" _
+    Then
+        If InStr(MSGPATH, "_Email_") > 0 _
+        Then
+            Stop
+            'OLAttachment.SaveAsFile EmailFolder & "Email_" & j & ".msg"
+            'j = j + 1
+        End If
+        
+        GoTo Skip:
+    Else: Stop
+    End If
+    
+    i = i + 1
+    
+Skip:
+Next OLAttachment
+
+wrdApp.Quit
+
+End Function
+
+Public Sub SaveEmailAttachmentsToFolder()
+
+Call LudicrousMode(True)
+
+Dim SaveDirectory As String: SaveDirectory = "C:\Users\oahearne\Downloads\CA_Downloads\"
+
+Dim OutApp As Outlook.Application: Set OutApp = New Outlook.Application
+Dim NSOutlook: Set NSOutlook = OutApp.GetNamespace("MAPI")
+
+Dim Inbox As MAPIFolder: Set Inbox = NSOutlook.GetDefaultFolder(olFolderInbox)
+Dim Subfolder As MAPIFolder: Set Subfolder = Inbox.Folders("Temp")
+
+Dim MyAttachment As Attachment
+Dim i As Integer: i = 1
+
+Dim MyMessage As Outlook.MailItem: For Each MyMessage In Subfolder.Items
+
+    Dim MessageTime As String: MessageTime = Format(MyMessage.ReceivedTime, "MM_DD_YY_HH_MM_SS")
+    
+    MkDir SaveDirectory & MessageTime
+    
+    For Each MyAttachment In MyMessage.Attachments
+    
+        MyAttachment.SaveAsFile SaveDirectory & MessageTime & "\" & i & "." & Split(MyAttachment.DisplayName, ".")(1)
+        i = i + 1
+    
+    Next MyAttachment
+    
+Next MyMessage
+
+Call LudicrousMode(False)
+
+End Sub
+
+Public Function Get_File_Explorer(MYFOLDER As String) As InternetExplorer
+
+'Get File Explorer Folder
+Dim Sh32 As Object: Set Sh32 = CreateObject("Shell.Application"): Dim ExplorerWindow: For Each ExplorerWindow In Sh32.Windows
+
+    If ExplorerWindow = "File Explorer" _
+    Then
+        Exit For
+    End If
+
+Next
+
+'If No File Explorer
+If ExplorerWindow = Empty _
+Then
+    Shell "Explorer.exe " & MYFOLDER, vbNormalFocus
+    Do While ExplorerWindow = Empty
+        For Each ExplorerWindow In Sh32.Windows
+    
+            If ExplorerWindow = "File Explorer" _
+            Then
+                Exit For
+            End If
+    
+        Next ExplorerWindow
+    Loop
+Else
+    ShowWindow ExplorerWindow.hwnd, 3
+    AppActivate ExplorerWindow.LocationName
+    ExplorerWindow.Navigate MYFOLDER
+End If
+
+'Wait For File Explorer
+Do While ExplorerWindow.Busy = True
+    DoEvents
+Loop
+
+Set Get_File_Explorer = ExplorerWindow
+
+End Function
+
+Public Sub LudicrousMode(ByVal Toggle As Boolean)
+
+Application.ScreenUpdating = Not Toggle
+Application.EnableEvents = Not Toggle
+Application.DisplayAlerts = Not Toggle
+Application.EnableAnimations = Not Toggle
+Application.DisplayStatusBar = Not Toggle
+Application.PrintCommunication = Not Toggle
+Application.Calculation = IIf(Toggle, xlCalculationManual, xlCalculationAutomatic)
+    
+End Sub
+
+Public Function Merge_PDFS(MYFILEARRAY() As String)
+
+Dim AcrobatApp As Acrobat.AcroApp: Set AcrobatApp = New Acrobat.AcroApp
+Dim AcrobatTarget As Acrobat.AcroPDDoc: Set AcrobatTarget = New Acrobat.AcroPDDoc
+Dim AcrobatDestination As Acrobat.AcroPDDoc: Set AcrobatDestination = New Acrobat.AcroPDDoc
+
+Dim MainFilePath As String: MainFilePath = MYFILEARRAY(0): AcrobatDestination.Open MainFilePath
+
+Dim Status As Boolean: Status = False
+Dim Element As Variant: For Each Element In MYFILEARRAY()
+    
+    If Status = True _
+    Then
+        AcrobatTarget.Open Element
+        AcrobatDestination.InsertPages AcrobatDestination.GetNumPages() - 1, AcrobatTarget, 0, AcrobatTarget.GetNumPages(), True
+        AcrobatTarget.Close
+        Kill Element
+    End If
+    
+    Status = True
+
+Next Element
+
+AcrobatDestination.Save 2, Replace(MainFilePath, ".", "_Final.")
+
+AcrobatDestination.Close
+AcrobatApp.Exit
+
+Kill MainFilePath
+
+End Function
